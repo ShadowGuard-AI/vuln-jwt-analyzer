@@ -32,6 +32,8 @@ class JWTAnalyzer:
         self.header = None
         self.payload = None
         self.signature = None
+        self.raw_signing_input = None
+        self.malformed_claim = False
 
     def decode_jwt(self):
         """
@@ -46,6 +48,7 @@ class JWTAnalyzer:
             self.header = self.decode_part(parts[0])
             self.payload = self.decode_part(parts[1])
             self.signature = parts[2]
+            self.raw_signing_input = parts[0] + '.' + parts[1]
 
         except ValueError as e:
             logging.error(f"Error decoding JWT: {e}")
@@ -121,13 +124,19 @@ class JWTAnalyzer:
             logging.warning("No secret provided for signature verification. Provide a secret to check.")
             return False
 
-        try:
-            header_json = json.dumps(self.header, sort_keys=True, separators=(',', ':'))
-            payload_json = json.dumps(self.payload, sort_keys=True, separators=(',', ':'))
-            message = base64.urlsafe_b64encode(header_json.encode('utf-8')).rstrip(b'=').decode('utf-8') + '.' + \
-                      base64.urlsafe_b64encode(payload_json.encode('utf-8')).rstrip(b'=').decode('utf-8')
+        alg = self.header.get('alg')
+        hash_for_alg = {'HS256': hashlib.sha256, 'HS384': hashlib.sha384, 'HS512': hashlib.sha512}
+        if alg not in hash_for_alg:
+            logging.warning(f"Signature verification not supported for algorithm '{alg}' with an HMAC secret. Asymmetric algorithms (RS and ES families) need a public key, not a shared secret, so no HMAC check was run.")
+            return False
 
-            expected_signature = hmac.new(secret.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()
+        try:
+            # Verify over the token's original encoded segments exactly as
+            # received. Re-serializing the decoded JSON would change the
+            # signed bytes whenever the issuer's key order differs.
+            message = self.raw_signing_input
+
+            expected_signature = hmac.new(secret.encode('utf-8'), message.encode('utf-8'), hash_for_alg[alg]).digest()
             expected_signature_b64 = base64.urlsafe_b64encode(expected_signature).rstrip(b'=').decode('utf-8')
             
             if expected_signature_b64 == self.signature:
@@ -154,20 +163,25 @@ class JWTAnalyzer:
         # Check for common claims like 'exp' (expiration time)
         if 'exp' in self.payload:
             expiration_time = self.payload['exp']
-            logging.info(f"Expiration Time (exp): {expiration_time}")
-
-            # Basic check if the token is expired
-            import time
-            if expiration_time < time.time():
-                logging.warning("Token is expired.")
+            if isinstance(expiration_time, bool) or not isinstance(expiration_time, (int, float)):
+                logging.error("Malformed token: the 'exp' claim is not a number, so the expiration cannot be checked.")
+                self.malformed_claim = True
             else:
-                logging.info("Token is not expired.")
+                logging.info(f"Expiration Time (exp): {expiration_time}")
 
-        # Check for other potentially sensitive claims
+                # Basic check if the token is expired
+                import time
+                if expiration_time < time.time():
+                    logging.warning("Token is expired.")
+                else:
+                    logging.info("Token is not expired.")
+
+        # Check for other potentially sensitive claims. Claim values are
+        # never printed: the finding is the claim name and its presence.
         sensitive_claims = ['sub', 'user_id', 'email', 'username']  # Add more as needed
         for claim in sensitive_claims:
             if claim in self.payload:
-                logging.info(f"Found sensitive claim: {claim} = {self.payload[claim]}")
+                logging.info(f"Found sensitive claim: {claim} (value present, not shown)")
 
         # Implement more sophisticated checks based on your application's context
 
@@ -181,15 +195,14 @@ class JWTAnalyzer:
         """
         try:
             headers = {'Authorization': f'Bearer {self.jwt_token}'}
-            response = requests.get(target_url, headers=headers)
+            response = requests.get(target_url, headers=headers, timeout=10)
 
+            # Only the status is reported. Response bodies are never
+            # logged, and a status code alone is not a scan outcome.
             if response.status_code == 200:
-                logging.info(f"Vulnerability scan against {target_url} successful. Response code: {response.status_code}")
+                logging.info(f"Target {target_url} responded with status 200 to the scan request carrying the token.")
             else:
-                logging.warning(f"Vulnerability scan against {target_url} failed. Response code: {response.status_code}")
-                # Analyze the response for potential vulnerabilities.  Example:
-                if "error" in response.text.lower():
-                    logging.warning(f"Potential vulnerability detected in the response: {response.text}")
+                logging.warning(f"Target {target_url} responded with status {response.status_code} to the scan request carrying the token.")
 
         except requests.exceptions.RequestException as e:
             logging.error(f"Error during vulnerability scan: {e}")
@@ -236,6 +249,10 @@ def main():
 
     if target_url:
         analyzer.run_vulnerability_scan(target_url)
+
+    if analyzer.malformed_claim:
+        logging.error("JWT analysis finished with a malformed claim. See the malformed token report above.")
+        sys.exit(1)
 
     logging.info("JWT analysis completed.")
 
