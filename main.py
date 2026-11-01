@@ -80,6 +80,9 @@ class JWTAnalyzer:
             
             decoded_bytes = base64.urlsafe_b64decode(encoded_part)
             decoded_string = decoded_bytes.decode('utf-8')
+            # Nothing here forces the JSON to be an object. A token whose
+            # header decodes to a list or a number passes this function and
+            # then fails later when analyze_algorithm calls .get on it.
             return json.loads(decoded_string)
 
         except base64.binascii.Error:
@@ -102,6 +105,9 @@ class JWTAnalyzer:
 
         logging.info(f"Algorithm used: {alg}")
 
+        # Algorithm names are matched exactly, case included. A header
+        # that says None or hs256 lands in the unknown branch below, even
+        # though a lenient verifier might treat them as the real thing.
         if alg == 'none':
             logging.warning("Vulnerability: 'alg' is set to 'none', indicating no signature verification is performed.")
         elif alg in ['HS256', 'HS384', 'HS512']:
@@ -163,6 +169,9 @@ class JWTAnalyzer:
         # Check for common claims like 'exp' (expiration time)
         if 'exp' in self.payload:
             expiration_time = self.payload['exp']
+            # bool is named first because Python booleans are integers. A
+            # token with exp set to true would pass a plain int check and
+            # then compare as 1 against the current time.
             if isinstance(expiration_time, bool) or not isinstance(expiration_time, (int, float)):
                 logging.error("Malformed token: the 'exp' claim is not a number, so the expiration cannot be checked.")
                 self.malformed_claim = True
@@ -250,6 +259,9 @@ def main():
     if target_url:
         analyzer.run_vulnerability_scan(target_url)
 
+    # The malformed claim exit comes after the optional target request on
+    # purpose: the scan still runs, and the exit code is what carries the
+    # malformed verdict back to whoever called this.
     if analyzer.malformed_claim:
         logging.error("JWT analysis finished with a malformed claim. See the malformed token report above.")
         sys.exit(1)
