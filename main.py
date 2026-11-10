@@ -47,6 +47,11 @@ class JWTAnalyzer:
 
             self.header = self.decode_part(parts[0])
             self.payload = self.decode_part(parts[1])
+            # The analysis steps call .get and claim lookups on these
+            # values, so a header or payload that decodes to a list,
+            # string, or number is a malformed token, not a crash.
+            if not isinstance(self.header, dict) or not isinstance(self.payload, dict):
+                raise ValueError("Invalid JWT format: header and payload must be JSON objects.")
             self.signature = parts[2]
             self.raw_signing_input = parts[0] + '.' + parts[1]
 
